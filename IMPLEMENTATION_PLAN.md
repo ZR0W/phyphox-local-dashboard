@@ -1,17 +1,17 @@
-# FiveBox Local Dashboard — Implementation Plan
+# Phyphox Local Dashboard — Implementation Plan
 
 ## 0. Context & Goal
 
-Each mobile device runs a **FiveBox server** — a phyphox-compatible embedded HTTP server exposing sensor data over an unauthenticated JSON/REST interface (`/get`, `/config`, `/meta`, `/control`, `/time`, `/export`), reachable only from devices on the same LAN segment (typically a phone hotspot). There is no push/streaming channel — live data is obtained by polling `/get` with incremental (threshold-based) requests.
+Each mobile device runs a **phyphox server** — phyphox's built-in embedded HTTP server exposing sensor data over an unauthenticated JSON/REST interface (`/get`, `/config`, `/meta`, `/control`, `/time`, `/export`), reachable only from devices on the same LAN segment (typically a phone hotspot). There is no push/streaming channel — live data is obtained by polling `/get` with incremental (threshold-based) requests.
 
 We need a **local web dashboard** (runs on a researcher's laptop, no cloud dependency) that:
 
-- Connects to **multiple** FiveBox devices concurrently.
+- Connects to **multiple** phyphox devices concurrently.
 - Displays their sensor streams live.
 - Lets the user filter, annotate, and manage the incoming data.
 - Provides controls (start/stop/clear, per-device and synchronized-all) with a clean UI.
 
-Because the FiveBox/phyphox interface is poll-only and unauthenticated, the dashboard's own backend does the polling and re-publishes the data over a push channel (WebSocket) to the browser UI — this isolates the browser from having to manage N concurrent polling loops and gives us a single point to add buffering, recording, and reconnection logic.
+Because the phyphox interface is poll-only and unauthenticated, the dashboard's own backend does the polling and re-publishes the data over a push channel (WebSocket) to the browser UI — this isolates the browser from having to manage N concurrent polling loops and gives us a single point to add buffering, recording, and reconnection logic.
 
 ---
 
@@ -19,10 +19,10 @@ Because the FiveBox/phyphox interface is poll-only and unauthenticated, the dash
 
 ```mermaid
 flowchart LR
-    subgraph Phones["FiveBox Devices (LAN)"]
-        P1["Phone 1\nFiveBox server\n:8080"]
-        P2["Phone 2\nFiveBox server\n:8080"]
-        P3["Phone N\nFiveBox server\n:80/:8080"]
+    subgraph Phones["Phyphox Devices (LAN)"]
+        P1["Phone 1\nphyphox server\n:8080"]
+        P2["Phone 2\nphyphox server\n:8080"]
+        P3["Phone N\nphyphox server\n:80/:8080"]
     end
 
     subgraph Laptop["Local Dashboard (single process, runs on laptop)"]
@@ -73,7 +73,7 @@ flowchart LR
 
 | Layer | Choice | Rationale |
 |---|---|---|
-| Backend runtime | **Node.js + TypeScript** | Single language across stack; excellent async HTTP client support (`undici`/`axios`) for concurrent polling; trivial WebSocket server (`ws`); easy to package as a local CLI (`npx fivebox-dashboard`). |
+| Backend runtime | **Node.js + TypeScript** | Single language across stack; excellent async HTTP client support (`undici`/`axios`) for concurrent polling; trivial WebSocket server (`ws`); easy to package as a local CLI (`npx phyphox-dashboard`). |
 | Backend framework | **Fastify** (or Express) | Minimal REST layer for device/session/config endpoints. |
 | Realtime transport | **`ws`** (WebSocket) | Simple, no extra broker needed for a single-laptop app. |
 | Local persistence | **SQLite via `better-sqlite3`** | Zero-config embedded DB, fine for a local desktop tool; stores sessions/samples for export and replay. Device list config as a small JSON file. |
@@ -97,7 +97,7 @@ sequenceDiagram
     participant UI as Frontend
     participant API as Backend REST API
     participant DM as Device Manager
-    participant Phone as FiveBox device
+    participant Phone as phyphox device
 
     User->>UI: Enter IP:port (+ nickname), click "Add Device"
     UI->>API: POST /api/devices {baseUrl, name}
@@ -112,7 +112,7 @@ sequenceDiagram
 ### 3.2 Live data to the browser
 ```mermaid
 sequenceDiagram
-    participant Phone as FiveBox device
+    participant Phone as phyphox device
     participant PW as Poller Worker
     participant AGG as Aggregator
     participant WS as WebSocket Hub
@@ -134,7 +134,7 @@ sequenceDiagram
     participant UI as Frontend
     participant API as Backend REST API
     participant PW as Poller Worker(s)
-    participant Phone as FiveBox device(s)
+    participant Phone as phyphox device(s)
 
     User->>UI: Click "Start All"
     UI->>API: POST /api/control {cmd: start, target: all}
@@ -144,6 +144,8 @@ sequenceDiagram
     PW-->>API: per-device result
     API-->>UI: aggregated result (success/failure per device)
 ```
+
+> ⚠️ **Open question (see Section 4):** controls can target a single device or all devices — but if one device is stopped/paused while others keep running and then it is resumed later, what happens to that device's timestamps and data continuity relative to the others? This needs to be resolved with real captured data before we finalize the recording/export behavior — see Section 4.
 
 ### 3.4 Export
 ```mermaid
@@ -162,7 +164,34 @@ sequenceDiagram
 
 ---
 
-## 4. Core Features
+## 4. Cross-Device Time Synchronization & Control Semantics (Open — Needs Captured Data)
+
+This section exists so we don't lose track of a feature area that matters a lot for multi-phone experiments but can't be fully designed until we've captured real data. **Do not let this get dropped — revisit it explicitly before finalizing Phases 4–5.**
+
+### 4.1 Can we trust cross-device timestamps for meaningful comparison?
+The core question: if phone B reports a value at timestamp A, and phone C reports a value at timestamp A, can we treat those as "the same instant" and meaningfully compare/plot/correlate them?
+
+Why this isn't free:
+- Each phone's `t` values in `/get` are experiment-local (seconds since that device's measurement started/last cleared), **not** wall-clock time by default.
+- Phyphox's `/time` endpoint (v1.1.8+) exposes an event mapping between experiment time and the device's own Unix wall-clock time — this is the mechanism we'd use to translate each device's stream into a shared timeline.
+- But phone clocks are not guaranteed to be synchronized with each other (no NTP guarantee on a private hotspot, possible drift over a long session), and our own polling loop adds variable latency per request. So "aligned via `/time`" gives us an estimate of simultaneity, not a hardware-guaranteed one.
+- Practical accuracy will depend on: how far apart phone clocks actually are in practice, how much polling jitter we introduce, and how much precision the use case actually needs (e.g., "within the same second" vs. "within 5 ms").
+
+**Plan:** implement `/time`-based alignment as described in Sections 3 and 8 (nice-to-have #9), but treat the *accuracy* of that alignment as unverified until we test it. Recommended validation step once you have two phyphox devices reachable: run a short synchronized session (e.g., tap both phones at a visibly shared physical event, like a simultaneous drop or knock) and check in the dashboard whether the two devices' aligned timestamps land within an acceptable tolerance of each other. We'll set the actual tolerance/expectation after seeing that first real capture — flagged here as an explicit **open question to revisit with you once you've captured some data**, rather than guessed at now.
+
+### 4.2 What happens to data/timestamps when one device is paused and resumes out of sync with the others?
+Directly related to the control commands in Section 3.3: Start/Stop/Clear can be sent to a single device or to all devices, which means devices can end up in different run states at the same wall-clock moment (e.g., device C is stopped for 10 seconds while A and B keep recording, then C resumes).
+
+Open questions we are **explicitly deferring** until we can inspect real captured sessions:
+- Does phyphox's experiment-local clock (`t`) reset to 0 on resume, keep counting from where it left off, or jump — and does that break the `/time` wall-clock mapping established in 4.1?
+- When we later inspect a combined/aligned export, how should the dashboard represent the gap for the paused device — a visible time gap in its series, a flagged "paused" annotation, interpolated/null values, or something else?
+- Should the dashboard visually mark, on the live chart and in the recorded session, the exact interval during which a device was paused relative to the others — so it's obvious on inspection which data windows are trustworthy for cross-device comparison per 4.1?
+
+**Decision deferred by design:** rather than guess at the right export/annotation behavior now, we'll capture a real "pause one device mid-session" test session once basic recording exists (end of Phase 4 / start of Phase 5), inspect what phyphox actually reports across the pause/resume, and design the gap-handling and export representation from that real behavior. This is called out again as an open item in Section 12.
+
+---
+
+## 5. Core Features
 
 ### MVP (must-have)
 1. **Device management** — add device by `IP[:port]` + nickname, see live connection status (connected / reconnecting / offline), remove device. Support both Android (`:8080`) and iOS (`:80`, port optional) address forms.
@@ -175,7 +204,7 @@ sequenceDiagram
 8. **Resilience** — automatic reconnect with backoff if a phone drops off the network; UI clearly flags stale/disconnected devices rather than silently freezing.
 
 ### Nice-to-have (post-MVP)
-9. **Timestamp alignment across devices** using each device's `/time` endpoint, so multi-phone sessions can be correlated to wall-clock time.
+9. **Timestamp alignment across devices** using each device's `/time` endpoint, so multi-phone sessions can be correlated to wall-clock time — see Section 4 for the open questions on accuracy and pause/resume behavior that must be resolved first.
 10. **Filtering/search** within a session's recorded data (time range scrub, sensor filter) before export.
 11. **Threshold alerts** (e.g., flag when a value exceeds a bound) — visual highlight only, no external notifications for v1.
 12. **Session replay** — re-play a recorded session through the same chart UI as if it were live.
@@ -184,16 +213,16 @@ sequenceDiagram
 
 ### Explicitly out of scope for v1
 - Cloud sync / remote access from outside the LAN.
-- Authentication on the FiveBox/phyphox side (not something we control — dashboard should surface a one-time warning about operating on a private network only).
+- Authentication on the phyphox side (not something we control — dashboard should surface a one-time warning about operating on a private network only).
 - Mobile-responsive dashboard (this is a desktop-facing lab tool; graceful degradation only, not a design goal).
 
 ---
 
-## 5. UI Components
+## 6. UI Components
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
-│ Top Bar:  FiveBox Dashboard      [● Recording 00:32]  [Start All] [Stop All│
+│ Top Bar:  Phyphox Dashboard      [● Recording 00:32]  [Start All] [Stop All│
 │                                   [Clear All]  [Export ▾]  [Settings ⚙]    │
 ├───────────┬─────────────────────────────────────────────────────────────┤
 │ Sidebar   │  Dashboard Grid                                              │
@@ -222,7 +251,7 @@ sequenceDiagram
 
 ---
 
-## 6. Data Model (shared types)
+## 7. Data Model (shared types)
 
 ```ts
 interface Device {
@@ -258,24 +287,71 @@ interface Session {
 
 ---
 
-## 7. Security & Network Considerations
-- FiveBox/phyphox's remote interface is **unauthenticated** — the dashboard cannot add security on the phone side. Surface a one-time banner: *"Only connect to devices on a private, trusted network (e.g., phone hotspot). Anyone on this network can read and control connected devices."*
+## 8. Security & Network Considerations
+- Phyphox's remote interface is **unauthenticated** — the dashboard cannot add security on the phone side. Surface a one-time banner: *"Only connect to devices on a private, trusted network (e.g., phone hotspot). Anyone on this network can read and control connected devices."*
 - The dashboard's own backend binds to `localhost` by default; do not bind `0.0.0.0` unless the user explicitly opts in (e.g., to view the dashboard from another device on the same LAN).
 - No external network calls other than to configured device IPs — no analytics/telemetry.
 - Validate/sanitize user-entered host:port before constructing request URLs (basic allowlist of hostname/IP + port pattern) to avoid SSRF-style misuse of the backend as an open proxy.
 
 ---
 
-## 8. Phased Development Roadmap
+## 9. Documentation Deliverable: README / Getting Started
+
+A `README.md` is a required deliverable (Phase 0 stub, filled in through Phase 7 — see roadmap), not an afterthought. It must let a new user go from a fresh clone to a working multi-device dashboard without reading this plan. Required contents:
+
+1. **Overview** — one paragraph on what the dashboard does and that it talks to phyphox's built-in remote-access server.
+2. **Prerequisites**
+   - Node.js version required.
+   - Phone-side setup: open phyphox, load/select an experiment, enable **"Allow remote access"**, note the displayed `IP:port`.
+   - Network setup: phone and laptop must be on the same routable network segment — recommend phone hotspot; note that some institutional/public Wi-Fi blocks client-to-client traffic.
+3. **Installation** — clone, install, build steps.
+4. **Starting the server** — the exact command (e.g. `npm start`) and what to expect (it launches the local backend and opens the dashboard in a browser tab at `http://localhost:<port>`).
+5. **Adding a device** — step-by-step: click "+ Add Device," enter the IP (and port — default `8080` on Android, `80`/blank on iOS) shown on the phone, give it a nickname, confirm the discovered sensors.
+6. **Controls reference** — a table of every control the dashboard exposes and exactly what it does:
+
+   | Control | Scope | Effect |
+   |---|---|---|
+   | Start (per device) | one device | sends `/control?cmd=start` to that phone |
+   | Stop (per device) | one device | sends `/control?cmd=stop` to that phone |
+   | Clear (per device) | one device | sends `/control?cmd=clear` to that phone |
+   | Start All / Stop All / Clear All | all connected devices | fans the same commands out to every device, reports per-device success/failure |
+   | Record Session | dashboard-side only | begins persisting incoming samples to local storage; does not itself start/stop any phone |
+   | Export | dashboard-side only | downloads a recorded session as CSV/JSON |
+   | Remove device | one device | stops polling and forgets the device (does not affect the phone) |
+
+7. **Troubleshooting** — device stuck "reconnecting" (check network isolation/hotspot), iOS port defaults, what "paused" looks like on a device card, where exported files are saved.
+
+This table (and the rest of the README) must be kept in sync as features land in each roadmap phase — updating it is part of the definition-of-done for any phase that changes a control or add-device flow, not a separate cleanup task.
+
+---
+
+## 10. Living Agent Context Doc (`CLAUDE.md`)
+
+To make it possible to pick this project back up in a brand-new agent session with no prior conversation history, the repo maintains a root-level `CLAUDE.md` that a fresh agent reads first. It is **not** a duplicate of this plan — it's a short, continuously-updated status snapshot:
+
+- One-paragraph project summary (what this is, what phyphox is, what "the dashboard" means here).
+- Current implementation status (which roadmap phase is done/in progress) with a pointer to `IMPLEMENTATION_PLAN.md` for full detail.
+- Key architectural decisions already locked in (stack choices, backend-owns-all-polling design) so an agent doesn't re-litigate them.
+- The live list of **open questions** from Section 12 below, so unresolved decisions aren't silently forgotten or re-decided inconsistently across sessions.
+- How to run the project locally (dev server, tests) as of the current state.
+
+**Maintenance rule:** whichever change lands at the end of each roadmap phase (or any PR that resolves an open question or changes an architectural decision) must update `CLAUDE.md` in the same commit/PR. Stale `CLAUDE.md` content is worse than none, so treat it as part of the phase's definition-of-done, same as the README.
+
+`CLAUDE.md` has been created at the repo root now, ahead of any code, so it's live from the start of implementation.
+
+---
+
+## 11. Phased Development Roadmap
 
 **Phase 0 — Project scaffolding** (0.5–1 day)
 - Monorepo layout: `backend/`, `frontend/`, `shared/` (types).
 - Tooling: TypeScript, ESLint/Prettier, Vitest/Jest, basic CI (lint + typecheck + test).
+- Create stub `README.md` (Section 9 outline) and `CLAUDE.md` (Section 10) so both exist from commit one and get filled in as phases land.
 
 **Phase 1 — Single-device polling backbone** (2–3 days)
-- FiveBox HTTP client: `getMeta`, `getConfig`, `getBuffers` (threshold-based), `control(cmd)`.
+- Phyphox HTTP client: `getMeta`, `getConfig`, `getBuffers` (threshold-based), `control(cmd)`.
 - One Poller Worker, in-memory ring buffer, minimal REST (`POST /api/devices`, `GET /api/devices`) and WebSocket broadcast.
-- Goal: `curl`/Postman-verifiable end-to-end pipeline from one real (or simulated) FiveBox device to a WebSocket message.
+- Goal: `curl`/Postman-verifiable end-to-end pipeline from one real (or simulated) phyphox device to a WebSocket message.
 
 **Phase 2 — Minimal frontend, one live chart** (2–3 days)
 - React app scaffold, WebSocket client, single device card with one uPlot chart proving live rendering works.
@@ -290,20 +366,24 @@ interface Session {
 
 **Phase 5 — Recording & export** (3–4 days)
 - SQLite-backed Session Recorder; Record toggle in top bar; Export modal (CSV/JSON, per-device vs combined+aligned via `/time`).
+- Run the pause/resume validation capture from Section 4.2 and the cross-device sync accuracy check from Section 4.1; update Section 12/`CLAUDE.md` with the resolved behavior.
 
 **Phase 6 — UX polish & resilience** (2–3 days)
 - Device detail/full-screen view, settings panel (poll interval, window length, theme), toasts for errors, empty/loading states, private-network warning banner.
 
 **Phase 7 — Packaging & docs** (1–2 days)
 - `npm start` launches backend + serves built frontend + opens browser tab.
-- README: setup, how to enable FiveBox remote access on a phone, troubleshooting (network isolation, iOS port 80, etc.).
+- Finalize `README.md` per the Section 9 spec (setup, adding devices, full controls reference table, troubleshooting) and bring `CLAUDE.md` up to date with final v1 status.
 - (Optional, later milestone) Electron wrapper for a native double-click launch experience.
 
 **Total estimate:** roughly 3–3.5 weeks of focused solo development for Phases 0–7 (MVP through polish + packaging), before optional nice-to-haves.
 
 ---
 
-## 9. Open Questions for the User
+## 12. Open Questions for the User
+
+- **[Deferred to captured data, see Section 4.1]** Can phyphox devices' timestamps (via `/time`) be trusted to meaningfully compare/correlate data across phones, and to what tolerance? To be revisited once you've captured a synchronized multi-device test session.
+- **[Deferred to captured data, see Section 4.2]** When one device is paused/stopped while others keep running and then resumes, what should the dashboard show for that device's data during/after the gap (visible gap, "paused" annotation, interpolation, etc.)? To be revisited once you've captured a pause/resume test session.
 - Preferred data-persistence format for export: raw per-device CSV, a single time-aligned combined CSV, or both?
 - Expected max number of concurrent devices (affects whether 200 ms polling per device is safe, or whether we need adaptive interval scaling)?
 - Is an Electron-packaged desktop app a hard requirement, or is "run `npm start`, dashboard opens in your default browser" acceptable for v1?
