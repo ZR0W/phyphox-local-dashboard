@@ -12,10 +12,12 @@
   },
   "dependencies": {
     "@phyphox-dashboard/shared": "*",
-    "fastify": "^5.2.0"
+    "fastify": "^5.2.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
     "tsx": "^4.19.2",
     "vitest": "^4.1.9"
   }

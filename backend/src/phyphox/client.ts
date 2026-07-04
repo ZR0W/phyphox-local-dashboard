@@ -1,0 +1,65 @@
+import type {
+  PhyphoxConfig,
+  PhyphoxControlCommand,
+  PhyphoxControlResponse,
+  PhyphoxGetResponse,
+  PhyphoxMeta,
+} from './types.js';
+
+const REQUEST_TIMEOUT_MS = 3000;
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`phyphox request failed: ${response.status} ${url}`);
+    }
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Thin wrapper over one phyphox device's remote-access HTTP interface.
+ * Endpoint shapes per https://phyphox.org/wiki/index.php/Remote-interface_communication
+ * and the community client behavior documented there (/get threshold syntax,
+ * /control result field) - /meta is treated as an opaque passthrough since its
+ * exact schema isn't required for polling.
+ */
+export class PhyphoxClient {
+  constructor(private readonly baseUrl: string) {}
+
+  getMeta(): Promise<PhyphoxMeta> {
+    return fetchJson<PhyphoxMeta>(`${this.baseUrl}/meta`);
+  }
+
+  getConfig(): Promise<PhyphoxConfig> {
+    return fetchJson<PhyphoxConfig>(`${this.baseUrl}/config`);
+  }
+
+  async control(cmd: PhyphoxControlCommand): Promise<void> {
+    const result = await fetchJson<PhyphoxControlResponse>(`${this.baseUrl}/control?cmd=${cmd}`);
+    if (!result.result) {
+      throw new Error(`phyphox refused control command: ${cmd}`);
+    }
+  }
+
+  /** Threshold-based incremental fetch: only samples newer than `since` (per timeBufferName) are returned. */
+  getBuffers(
+    bufferNames: string[],
+    since: number,
+    timeBufferName = 'time',
+  ): Promise<PhyphoxGetResponse> {
+    const query = bufferNames
+      .map((name) =>
+        name === timeBufferName
+          ? `${encodeURIComponent(name)}=${since}`
+          : `${encodeURIComponent(name)}=${since}|${encodeURIComponent(timeBufferName)}`,
+      )
+      .join('&');
+    return fetchJson<PhyphoxGetResponse>(`${this.baseUrl}/get?${query}`);
+  }
+}

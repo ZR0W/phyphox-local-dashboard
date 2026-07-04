@@ -8,7 +8,11 @@ A local web dashboard (runs on a researcher's laptop, no cloud) that connects to
 
 ## Current status
 
-**Phase 0 (project scaffolding) complete, in a PR.** npm-workspaces monorepo (`shared/`, `backend/`, `frontend/`) with TypeScript, ESLint (flat config), Prettier, Vitest, and GitHub Actions CI wired up. `backend` is a Fastify skeleton with one `GET /api/health` route; `frontend` is a Vite+React skeleton rendering a placeholder page; both have one smoke test proving the toolchain works end-to-end. No phyphox-connecting logic exists yet — that's Phase 1, next up, per `IMPLEMENTATION_PLAN.md` Section 11.
+**Phases 0–2 complete.** Phase 0: npm-workspaces monorepo (`shared/`, `backend/`, `frontend/`) with TypeScript, ESLint (flat config), Prettier, Vitest, GitHub Actions CI. Phase 1: backend polling backbone — `backend/src/phyphox/client.ts` wraps phyphox's `/config`, `/meta`, `/control`, `/get` (threshold-based incremental fetch); `backend/src/poller.ts` (`DevicePoller`) discovers sensors then polls with exponential backoff/reconnect; `backend/src/deviceManager.ts` is the in-memory device registry; REST routes (`backend/src/routes.ts`) + a WebSocket hub (`backend/src/ws.ts`, using `ws`, path `/ws`) expose it. Phase 2: frontend has an Add Device form, a `useDashboardSocket` hook consuming the WebSocket, and one live `uPlot` chart per device (`frontend/src/components/`). Verified end-to-end against a mock phyphox HTTP server in an integration test (`backend/src/integration.test.ts`) and manually in a real browser via Playwright against the same mock. Next up: Phase 3 (multi-device polish: sensor picker, connection-status UI, reconnect UX) per `IMPLEMENTATION_PLAN.md` Section 11.
+
+**Important build-order fix (carried forward, don't regress):** `shared/package.json`'s `main`/`types` point at `./dist/index.js`/`./dist/index.d.ts`, not raw `.ts` — Node 22 cannot load `.ts` files directly. Root `package.json` has a `postinstall` hook and `typecheck`/`test` prerequisites that run `npm run build --workspace shared` first; if you add new root scripts that skip this, a fresh clone will fail at runtime with `ERR_UNKNOWN_FILE_EXTENSION` the moment backend/frontend imports `@phyphox-dashboard/shared`.
+
+**phyphox wire format notes (see `backend/src/phyphox/client.ts` doc comment):** `/config`, `/meta` schemas aren't fully documented publicly — client code was built from the phyphox wiki summary plus a community client's confirmed behavior (`/control` returns `{result: boolean}`; `/get` threshold syntax is `time=X&buf=X|time`). `/meta` is treated as an opaque passthrough since nothing currently depends on its fields. `/time` (wall-clock alignment) is intentionally not yet implemented — deferred to whenever Section 4.1's sync question gets resolved. Treat all of this as best-effort until validated against a real phyphox device.
 
 ## Locked-in architectural decisions (don't re-litigate without reason)
 
@@ -31,8 +35,8 @@ A local web dashboard (runs on a researcher's laptop, no cloud) that connects to
 ## How to run locally
 
 ```bash
-npm install
+npm install   # postinstall builds shared/dist automatically
 npm run lint && npm run format && npm run typecheck && npm run test && npm run build
-npm run dev:backend    # Fastify skeleton on http://localhost:4173 (GET /api/health)
-npm run dev:frontend   # Vite dev server for the placeholder dashboard page
+npm run dev:backend    # Fastify + poller + WebSocket hub on http://localhost:4173
+npm run dev:frontend   # Vite dashboard on http://localhost:5173 (proxies /api, /ws to :4173)
 ```

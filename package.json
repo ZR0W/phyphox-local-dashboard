@@ -9,14 +9,16 @@
     "frontend"
   ],
   "scripts": {
+    "postinstall": "npm run build:shared",
+    "build:shared": "npm run build --workspace shared",
     "lint": "eslint .",
     "format": "prettier --check .",
     "format:fix": "prettier --write .",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run build:shared && npm run typecheck --workspaces --if-present",
+    "test": "npm run build:shared && npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
-    "dev:backend": "npm run dev --workspace backend",
-    "dev:frontend": "npm run dev --workspace frontend"
+    "dev:backend": "npm run build:shared && npm run dev --workspace backend",
+    "dev:frontend": "npm run build:shared && npm run dev --workspace frontend"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
