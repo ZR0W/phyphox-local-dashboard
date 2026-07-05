@@ -1,7 +1,22 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { networkInterfaces } from 'node:os';
 
 const TICK_MS = 20;
+
+// Bind to a real (non-loopback) LAN-ish address rather than 127.0.0.1 - real
+// phyphox devices are always on another host, and validateBaseUrl now rejects
+// loopback/link-local addresses, so a test "device" needs to look like one too.
+function getLanAddress(): string {
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const addr of addrs ?? []) {
+      if (addr.family === 'IPv4' && !addr.internal) {
+        return addr.address;
+      }
+    }
+  }
+  return '127.0.0.1';
+}
 
 /**
  * Minimal stand-in for a phyphox device's remote-access HTTP server, used so
@@ -15,6 +30,7 @@ export class MockPhyphoxServer {
   private tickHandle: NodeJS.Timeout | undefined;
   private t = 0;
   private lastControlCmd: string | undefined;
+  private failing = false;
 
   constructor(private readonly bufferNames: string[]) {
     for (const name of bufferNames) {
@@ -24,10 +40,10 @@ export class MockPhyphoxServer {
   }
 
   async listen(): Promise<string> {
-    await new Promise<void>((resolve) => this.server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve) => this.server.listen(0, '0.0.0.0', resolve));
     this.tickHandle = setInterval(() => this.tick(), TICK_MS);
     const { port } = this.server.address() as AddressInfo;
-    return `http://127.0.0.1:${port}`;
+    return `http://${getLanAddress()}:${port}`;
   }
 
   async close(): Promise<void> {
@@ -41,6 +57,19 @@ export class MockPhyphoxServer {
     return this.lastControlCmd;
   }
 
+  /** Simulates a network/device outage: every request fails until called again with false. */
+  setFailing(failing: boolean): void {
+    this.failing = failing;
+  }
+
+  /** Mirrors phyphox's real /control?cmd=clear behavior: wipes all buffers and resets the experiment clock. */
+  private clearData(): void {
+    this.t = 0;
+    for (const key of Object.keys(this.data)) {
+      this.data[key] = [];
+    }
+  }
+
   private tick(): void {
     this.t += TICK_MS / 1000;
     this.data.time.push(this.t);
@@ -50,6 +79,11 @@ export class MockPhyphoxServer {
   }
 
   private handle(req: IncomingMessage, res: ServerResponse): void {
+    if (this.failing) {
+      res.writeHead(500).end();
+      return;
+    }
+
     const url = new URL(req.url ?? '/', 'http://localhost');
 
     if (url.pathname === '/config') {
@@ -61,7 +95,9 @@ export class MockPhyphoxServer {
       return;
     }
     if (url.pathname === '/control') {
-      this.lastControlCmd = url.searchParams.get('cmd') ?? undefined;
+      const cmd = url.searchParams.get('cmd') ?? undefined;
+      this.lastControlCmd = cmd;
+      if (cmd === 'clear') this.clearData();
       this.json(res, { result: true });
       return;
     }

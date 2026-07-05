@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import type { DeviceStatus, Sample, SensorMeta } from '@phyphox-dashboard/shared';
+import type { Device, DeviceStatus, Sample, SensorMeta } from '@phyphox-dashboard/shared';
 import { WebSocketServer } from 'ws';
 import type { DeviceManager } from './deviceManager.js';
 
@@ -17,6 +17,14 @@ export function attachWebSocketHub(
       }
     }
   }
+
+  deviceManager.on('deviceAdded', (device: Device) => {
+    broadcast({ type: 'deviceAdded', device });
+  });
+
+  deviceManager.on('deviceRemoved', (deviceId: string) => {
+    broadcast({ type: 'deviceRemoved', deviceId });
+  });
 
   deviceManager.on('sample', (deviceId: string, samples: Sample[]) => {
     broadcast({ type: 'sample', deviceId, samples });

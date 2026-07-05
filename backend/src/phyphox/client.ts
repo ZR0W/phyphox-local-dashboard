@@ -8,11 +8,14 @@ import type {
 
 const REQUEST_TIMEOUT_MS = 3000;
 
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchJson<T>(url: string, externalSignal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const signal = externalSignal
+    ? AbortSignal.any([controller.signal, externalSignal])
+    : controller.signal;
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, { signal });
     if (!response.ok) {
       throw new Error(`phyphox request failed: ${response.status} ${url}`);
     }
@@ -28,20 +31,27 @@ async function fetchJson<T>(url: string): Promise<T> {
  * and the community client behavior documented there (/get threshold syntax,
  * /control result field) - /meta is treated as an opaque passthrough since its
  * exact schema isn't required for polling.
+ *
+ * Every method accepts an optional external AbortSignal so a caller (the
+ * poller) can cancel an in-flight request immediately - e.g. when a device
+ * is removed mid-poll - rather than waiting out the internal timeout.
  */
 export class PhyphoxClient {
   constructor(private readonly baseUrl: string) {}
 
-  getMeta(): Promise<PhyphoxMeta> {
-    return fetchJson<PhyphoxMeta>(`${this.baseUrl}/meta`);
+  getMeta(signal?: AbortSignal): Promise<PhyphoxMeta> {
+    return fetchJson<PhyphoxMeta>(`${this.baseUrl}/meta`, signal);
   }
 
-  getConfig(): Promise<PhyphoxConfig> {
-    return fetchJson<PhyphoxConfig>(`${this.baseUrl}/config`);
+  getConfig(signal?: AbortSignal): Promise<PhyphoxConfig> {
+    return fetchJson<PhyphoxConfig>(`${this.baseUrl}/config`, signal);
   }
 
-  async control(cmd: PhyphoxControlCommand): Promise<void> {
-    const result = await fetchJson<PhyphoxControlResponse>(`${this.baseUrl}/control?cmd=${cmd}`);
+  async control(cmd: PhyphoxControlCommand, signal?: AbortSignal): Promise<void> {
+    const result = await fetchJson<PhyphoxControlResponse>(
+      `${this.baseUrl}/control?cmd=${cmd}`,
+      signal,
+    );
     if (!result.result) {
       throw new Error(`phyphox refused control command: ${cmd}`);
     }
@@ -52,6 +62,7 @@ export class PhyphoxClient {
     bufferNames: string[],
     since: number,
     timeBufferName = 'time',
+    signal?: AbortSignal,
   ): Promise<PhyphoxGetResponse> {
     const query = bufferNames
       .map((name) =>
@@ -60,6 +71,6 @@ export class PhyphoxClient {
           : `${encodeURIComponent(name)}=${since}|${encodeURIComponent(timeBufferName)}`,
       )
       .join('&');
-    return fetchJson<PhyphoxGetResponse>(`${this.baseUrl}/get?${query}`);
+    return fetchJson<PhyphoxGetResponse>(`${this.baseUrl}/get?${query}`, signal);
   }
 }

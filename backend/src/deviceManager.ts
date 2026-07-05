@@ -53,6 +53,7 @@ export class DeviceManager extends EventEmitter {
 
     this.devices.set(id, { device, poller });
     poller.start();
+    this.emit('deviceAdded', device);
 
     return device;
   }
@@ -61,7 +62,12 @@ export class DeviceManager extends EventEmitter {
     const entry = this.devices.get(id);
     if (!entry) return false;
     entry.poller.stop();
+    // Detach listeners before the abort above's rejection is handled (it's
+    // async, this call is sync) so a request that was in flight at removal
+    // time can't re-emit 'status'/'sample' for a device that no longer exists.
+    entry.poller.removeAllListeners();
     this.devices.delete(id);
+    this.emit('deviceRemoved', id);
     return true;
   }
 

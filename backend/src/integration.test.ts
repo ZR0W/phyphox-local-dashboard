@@ -6,28 +6,50 @@ import { buildApp } from './app.js';
 import { DeviceManager } from './deviceManager.js';
 import { MockPhyphoxServer } from './testUtils/mockPhyphoxServer.js';
 
-function waitForMessage(
-  socket: WebSocket,
-  predicate: (message: Record<string, unknown>) => boolean,
-  timeoutMs = 3000,
-): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      socket.off('message', onMessage);
-      reject(new Error('Timed out waiting for expected WebSocket message'));
-    }, timeoutMs);
+type Msg = Record<string, unknown>;
 
-    function onMessage(raw: WebSocket.RawData) {
-      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
-      if (predicate(message)) {
-        clearTimeout(timer);
-        socket.off('message', onMessage);
-        resolve(message);
+/**
+ * Buffers every message from the moment the socket is created, so a waitFor()
+ * call can never race a broadcast that fires synchronously (e.g. 'deviceAdded'
+ * during the POST handler) and arrives before the test gets around to
+ * attaching a one-shot listener.
+ */
+function collectMessages(socket: WebSocket) {
+  const messages: Msg[] = [];
+  const waiters: Array<{ predicate: (m: Msg) => boolean; resolve: (m: Msg) => void }> = [];
+
+  socket.on('message', (raw) => {
+    const message = JSON.parse(raw.toString()) as Msg;
+    messages.push(message);
+    for (let i = waiters.length - 1; i >= 0; i -= 1) {
+      if (waiters[i].predicate(message)) {
+        waiters[i].resolve(message);
+        waiters.splice(i, 1);
       }
     }
-
-    socket.on('message', onMessage);
   });
+
+  function waitFor(predicate: (m: Msg) => boolean, timeoutMs = 5000): Promise<Msg> {
+    const existing = messages.find(predicate);
+    if (existing) return Promise.resolve(existing);
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const index = waiters.findIndex((w) => w.resolve === wrappedResolve);
+        if (index >= 0) waiters.splice(index, 1);
+        reject(new Error('Timed out waiting for expected WebSocket message'));
+      }, timeoutMs);
+
+      function wrappedResolve(message: Msg): void {
+        clearTimeout(timer);
+        resolve(message);
+      }
+
+      waiters.push({ predicate, resolve: wrappedResolve });
+    });
+  }
+
+  return { messages, waitFor };
 }
 
 describe('device polling pipeline', () => {
@@ -54,6 +76,7 @@ describe('device polling pipeline', () => {
   it('registers a device, polls it, and broadcasts samples over WebSocket', async () => {
     const socket = new WebSocket(`${baseUrl.replace('http', 'ws')}/ws`);
     await new Promise((resolve) => socket.once('open', resolve));
+    const { waitFor } = collectMessages(socket);
 
     const createResponse = await fetch(`${baseUrl}/api/devices`, {
       method: 'POST',
@@ -63,14 +86,15 @@ describe('device polling pipeline', () => {
     expect(createResponse.status).toBe(201);
     const device = (await createResponse.json()) as { id: string };
 
-    const sensorsMessage = await waitForMessage(
-      socket,
+    const addedMessage = await waitFor((message) => message.type === 'deviceAdded');
+    expect((addedMessage.device as { id: string }).id).toBe(device.id);
+
+    const sensorsMessage = await waitFor(
       (message) => message.type === 'sensors' && message.deviceId === device.id,
     );
     expect(sensorsMessage.sensors).toEqual([{ bufferName: 'accX', label: 'accX' }]);
 
-    const sampleMessage = await waitForMessage(
-      socket,
+    const sampleMessage = await waitFor(
       (message) => message.type === 'sample' && message.deviceId === device.id,
     );
     const samples = sampleMessage.samples as Array<{ bufferName: string; t: number; v: number }>;
@@ -99,5 +123,37 @@ describe('device polling pipeline', () => {
       body: JSON.stringify({ name: 'Bad Phone', baseUrl: 'https://192.168.1.5' }),
     });
     expect(response.status).toBe(400);
+  });
+
+  it('stops broadcasting for a device immediately after it is removed', async () => {
+    const socket = new WebSocket(`${baseUrl.replace('http', 'ws')}/ws`);
+    await new Promise((resolve) => socket.once('open', resolve));
+    const { messages, waitFor } = collectMessages(socket);
+
+    const createResponse = await fetch(`${baseUrl}/api/devices`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Test Phone', baseUrl: mockBaseUrl }),
+    });
+    const device = (await createResponse.json()) as { id: string };
+
+    await waitFor((message) => message.type === 'sample' && message.deviceId === device.id);
+    const messageCountBeforeRemoval = messages.length;
+
+    const deleteResponse = await fetch(`${baseUrl}/api/devices/${device.id}`, {
+      method: 'DELETE',
+    });
+    expect(deleteResponse.status).toBe(204);
+
+    await waitFor((message) => message.type === 'deviceRemoved' && message.deviceId === device.id);
+
+    // Give any in-flight request a chance to resolve and (incorrectly) re-broadcast.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const leaked = messages
+      .slice(messageCountBeforeRemoval)
+      .filter((message) => message.type !== 'deviceRemoved' && message.deviceId === device.id);
+    expect(leaked).toEqual([]);
+
+    socket.close();
   });
 });
