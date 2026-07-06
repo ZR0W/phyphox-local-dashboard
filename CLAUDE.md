@@ -8,12 +8,19 @@ A local web dashboard (runs on a researcher's laptop, no cloud) that connects to
 
 ## Current status
 
-**Phase 0 (project scaffolding) complete, in a PR.** npm-workspaces monorepo (`shared/`, `backend/`, `frontend/`) with TypeScript, ESLint (flat config), Prettier, Vitest, and GitHub Actions CI wired up. `backend` is a Fastify skeleton with one `GET /api/health` route; `frontend` is a Vite+React skeleton rendering a placeholder page; both have one smoke test proving the toolchain works end-to-end. No phyphox-connecting logic exists yet — that's Phase 1, next up, per `IMPLEMENTATION_PLAN.md` Section 11.
+**Phases 0–2 complete.** Phase 0: npm-workspaces monorepo (`shared/`, `backend/`, `frontend/`) with TypeScript, ESLint (flat config), Prettier, Vitest, GitHub Actions CI. Phase 1: backend polling backbone — `backend/src/phyphox/client.ts` wraps phyphox's `/config`, `/meta`, `/control`, `/get` (threshold-based incremental fetch); `backend/src/poller.ts` (`DevicePoller`) discovers sensors then polls with exponential backoff/reconnect; `backend/src/deviceManager.ts` is the in-memory device registry; REST routes (`backend/src/routes.ts`) + a WebSocket hub (`backend/src/ws.ts`, using `ws`, path `/ws`) expose it. Phase 2: frontend has an Add Device form, a `useDashboardSocket` hook consuming the WebSocket, and one live `uPlot` chart per device (`frontend/src/components/`). Verified end-to-end against a mock phyphox HTTP server in an integration test (`backend/src/integration.test.ts`) and manually in a real browser via Playwright against the same mock. Next up: Phase 3 (multi-device polish: sensor picker, connection-status UI, reconnect UX) per `IMPLEMENTATION_PLAN.md` Section 11.
+
+**Important build-order fix (carried forward, don't regress):** `shared/package.json`'s `main`/`types` point at `./dist/index.js`/`./dist/index.d.ts`, not raw `.ts` — Node 22 cannot load `.ts` files directly. Root `package.json` has a `postinstall` hook and `typecheck`/`test` prerequisites that run `npm run build --workspace shared` first; if you add new root scripts that skip this, a fresh clone will fail at runtime with `ERR_UNKNOWN_FILE_EXTENSION` the moment backend/frontend imports `@phyphox-dashboard/shared`.
+
+**phyphox wire format notes (see `backend/src/phyphox/client.ts` doc comment):** `/config`, `/meta` schemas aren't fully documented publicly — client code was built from the phyphox wiki summary plus a community client's confirmed behavior (`/control` returns `{result: boolean}`; `/get` threshold syntax is `time=X&buf=X|time`, where the `|` **must be sent percent-encoded as `%7C`** — confirmed against a real device (Android, Audio Spectrum experiment) that a literal `|` in the query gets rejected with `400 Bad Request` by phyphox's on-device HTTP server. `MockPhyphoxServer` didn't catch this because Node's own `URL`/`URLSearchParams` parsing is more lenient than phyphox's, so a passing integration test against the mock is not proof the query string is valid against a real device — re-test against real hardware after touching `getBuffers()`'s query construction. `/meta` is treated as an opaque passthrough since nothing currently depends on its fields. `/time` (wall-clock alignment) is intentionally not yet implemented — deferred to whenever Section 4.1's sync question gets resolved.
+
+**Review fixes applied after the Phase 1+2 PR (don't regress these):** WebSocket client reconnects with backoff on close/error (`useDashboardSocket.ts`); `DeviceManager` emits `deviceAdded`/`deviceRemoved` so devices registered after a tab connects actually appear, and `removeDevice()` calls `poller.removeAllListeners()` plus aborts the in-flight request (via `AbortSignal` threaded through `PhyphoxClient`) so a removed device can't keep broadcasting; `validateBaseUrl` rejects loopback/link-local addresses (127.0.0.0/8, 169.254.0.0/16, `localhost`) in addition to non-http schemes; `DevicePoller.control('clear')` resets its incremental time cursor to 0 since phyphox's clear wipes the experiment clock; `handleFailure()` resets `sensorsDiscovered` on transition to `offline` so a device re-runs `/config` discovery on recovery; backend now has `tsconfig.json` (typecheck, includes tests) vs `tsconfig.build.json` (build, excludes tests/testUtils) so the earlier test-exclusion fix no longer silently skips typechecking test files.
 
 ## Locked-in architectural decisions (don't re-litigate without reason)
 
 - Backend owns **all** polling of phone devices; the browser never talks to phones directly — only to the local backend via REST + WebSocket. (`IMPLEMENTATION_PLAN.md` Section 1)
-- Stack: Node.js + TypeScript backend (Fastify, `ws`, `better-sqlite3`), React + TypeScript + Vite frontend, uPlot for real-time charts, Zustand for state, Tailwind for styling. (Section 2)
+- Stack: Node.js + TypeScript backend (Fastify, `ws`, `better-sqlite3`), React + TypeScript + Vite frontend, uPlot for real-time charts, Tailwind for styling. (Section 2)
+- **Deviation from plan, recorded deliberately:** Section 2 named Zustand for frontend state, but Phase 2's `useDashboardSocket` hook (`frontend/src/lib/useDashboardSocket.ts`) uses plain `useState` + a hand-rolled reducer instead — the state (device map, per-buffer series) is only consumed by one hook feeding `App.tsx`, so a store added no value yet. Revisit this once Phase 3's multi-device UI (sensor picker, connection-status panel, etc.) needs to share this state across more components than just the one hook return value — don't silently assume Zustand is in place until that migration actually happens.
 - Packaging for v1: plain `npm start` that launches the backend and opens a browser tab — no Electron unless/until the user asks for it. (Section 2, open question in Section 12)
 - Phyphox's remote interface has no auth — the dashboard cannot add security phone-side; it binds to `localhost` by default and warns the user to stay on a private network. (Section 8)
 
@@ -31,8 +38,8 @@ A local web dashboard (runs on a researcher's laptop, no cloud) that connects to
 ## How to run locally
 
 ```bash
-npm install
+npm install   # postinstall builds shared/dist automatically
 npm run lint && npm run format && npm run typecheck && npm run test && npm run build
-npm run dev:backend    # Fastify skeleton on http://localhost:4173 (GET /api/health)
-npm run dev:frontend   # Vite dev server for the placeholder dashboard page
+npm run dev:backend    # Fastify + poller + WebSocket hub on http://localhost:4173
+npm run dev:frontend   # Vite dashboard on http://localhost:5173 (proxies /api, /ws to :4173)
 ```
