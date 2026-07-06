@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import type { Device, DeviceStatus, Sample, SensorMeta } from '@phyphox-dashboard/shared';
+import type { Device, DeviceStatus, LogEntry, Sample, SensorMeta } from '@phyphox-dashboard/shared';
 import { DevicePoller } from './poller.js';
 import { validateBaseUrl } from './security.js';
 import type { PhyphoxControlCommand } from './phyphox/types.js';
@@ -49,6 +49,10 @@ export class DeviceManager extends EventEmitter {
 
     poller.on('sample', (samples: Sample[]) => {
       this.emit('sample', id, samples);
+    });
+
+    poller.on('log', (entry: LogEntry) => {
+      this.emit('log', id, entry);
     });
 
     this.devices.set(id, { device, poller });

@@ -1,5 +1,13 @@
 export type DeviceStatus = 'connected' | 'reconnecting' | 'offline';
 
+export type LogLevel = 'info' | 'warn' | 'error';
+
+export interface LogEntry {
+  level: LogLevel;
+  message: string;
+  timestamp: number;
+}
+
 export interface SensorMeta {
   bufferName: string;
   label: string;

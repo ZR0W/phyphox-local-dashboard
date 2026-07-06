@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { DeviceStatus, Sample, SensorMeta } from '@phyphox-dashboard/shared';
+import type { DeviceStatus, LogLevel, Sample, SensorMeta } from '@phyphox-dashboard/shared';
 import { PhyphoxClient } from './phyphox/client.js';
 import type { PhyphoxConfig, PhyphoxControlCommand, PhyphoxGetResponse } from './phyphox/types.js';
 
@@ -7,12 +7,7 @@ const DEFAULT_POLL_INTERVAL_MS = 200;
 const DEFAULT_MAX_BACKOFF_MS = 5000;
 const DEFAULT_OFFLINE_AFTER_FAILURES = 5;
 const TIME_BUFFER_NAME = 'time';
-
-export interface DevicePollerOptions {
-  pollIntervalMs?: number;
-  maxBackoffMs?: number;
-  offlineAfterFailures?: number;
-}
+const POLL_LOG_THROTTLE_MS = 1000;
 
 function extractSensors(config: PhyphoxConfig): SensorMeta[] {
   return (config.buffers ?? [])
@@ -36,10 +31,16 @@ function toSamples(deviceId: string, response: PhyphoxGetResponse): Sample[] {
   return samples;
 }
 
+export interface DevicePollerOptions {
+  pollIntervalMs?: number;
+  maxBackoffMs?: number;
+  offlineAfterFailures?: number;
+}
+
 /**
  * Owns one device's polling loop: discovers its sensors via /config, then
  * repeatedly fetches new samples via threshold-based /get, with exponential
- * backoff and automatic retry on failure. Emits 'sensors', 'status', 'sample'.
+ * backoff and automatic retry on failure. Emits 'sensors', 'status', 'sample', 'log'.
  */
 export class DevicePoller extends EventEmitter {
   private readonly client: PhyphoxClient;
@@ -53,6 +54,8 @@ export class DevicePoller extends EventEmitter {
   private consecutiveFailures = 0;
   private selectedBuffers: string[] = [];
   private sensorsDiscovered = false;
+  private lastPollLogAt = 0;
+  private pendingLogSampleCount = 0;
 
   constructor(
     private readonly deviceId: string,
@@ -79,13 +82,24 @@ export class DevicePoller extends EventEmitter {
   }
 
   async control(cmd: PhyphoxControlCommand): Promise<void> {
-    await this.client.control(cmd);
-    if (cmd === 'clear') {
-      // phyphox's clear wipes the device's buffers and resets its experiment
-      // clock to 0, so our incremental cursor must reset too - otherwise every
-      // subsequent /get?since=<stale lastTime> is filtered out forever.
-      this.lastTime = 0;
+    this.log('info', `sending /control?cmd=${cmd}`);
+    try {
+      await this.client.control(cmd);
+      if (cmd === 'clear') {
+        // phyphox's clear wipes the device's buffers and resets its experiment
+        // clock to 0, so our incremental cursor must reset too - otherwise every
+        // subsequent /get?since=<stale lastTime> is filtered out forever.
+        this.lastTime = 0;
+      }
+      this.log('info', `/control?cmd=${cmd} succeeded`);
+    } catch (err) {
+      this.log('error', `/control?cmd=${cmd} failed: ${(err as Error).message}`);
+      throw err;
     }
+  }
+
+  private log(level: LogLevel, message: string): void {
+    this.emit('log', { level, message, timestamp: Date.now() });
   }
 
   private scheduleNext(delay: number): void {
@@ -114,9 +128,16 @@ export class DevicePoller extends EventEmitter {
       this.consecutiveFailures = 0;
       this.emit('sensors', sensors as SensorMeta[]);
       this.emit('status', 'connected' as DeviceStatus);
+      this.log(
+        'info',
+        `/config discovery succeeded: ${sensors.length} sensor(s) [${sensors
+          .map((sensor) => sensor.bufferName)
+          .join(', ')}]`,
+      );
       this.scheduleNext(0);
     } catch (err) {
       console.error(`[phyphox] device ${this.deviceId}: /config discovery failed:`, err);
+      this.log('error', `/config discovery failed: ${(err as Error).message}`);
       this.handleFailure();
     }
   }
@@ -140,6 +161,16 @@ export class DevicePoller extends EventEmitter {
       const samples = toSamples(this.deviceId, response);
       if (samples.length > 0) {
         this.emit('sample', samples);
+        this.pendingLogSampleCount += samples.length;
+        const now = Date.now();
+        if (now - this.lastPollLogAt >= POLL_LOG_THROTTLE_MS) {
+          this.log(
+            'info',
+            `polled: ${this.pendingLogSampleCount} sample(s) across [${this.selectedBuffers.join(', ')}] since last log`,
+          );
+          this.pendingLogSampleCount = 0;
+          this.lastPollLogAt = now;
+        }
       }
 
       const times = response.buffer[TIME_BUFFER_NAME]?.buffer ?? [];
@@ -150,6 +181,7 @@ export class DevicePoller extends EventEmitter {
       this.scheduleNext(this.pollIntervalMs);
     } catch (err) {
       console.error(`[phyphox] device ${this.deviceId}: /get poll failed:`, err);
+      this.log('error', `/get poll failed: ${(err as Error).message}`);
       this.handleFailure();
     }
   }
@@ -170,6 +202,11 @@ export class DevicePoller extends EventEmitter {
     const backoff = Math.min(
       this.pollIntervalMs * 2 ** this.consecutiveFailures,
       this.maxBackoffMs,
+    );
+    this.log(
+      status === 'offline' ? 'error' : 'warn',
+      `reconnecting: ${this.consecutiveFailures} consecutive failure(s), next attempt in ${backoff}ms` +
+        (status === 'offline' ? ' (marked offline, will re-discover sensors on recovery)' : ''),
     );
     this.scheduleNext(backoff);
   }

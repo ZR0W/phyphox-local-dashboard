@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import type { Device, DeviceStatus, Sample, SensorMeta } from '@phyphox-dashboard/shared';
+import type { Device, DeviceStatus, LogEntry, Sample, SensorMeta } from '@phyphox-dashboard/shared';
 import { WebSocketServer } from 'ws';
 import type { DeviceManager } from './deviceManager.js';
 
@@ -36,6 +36,10 @@ export function attachWebSocketHub(
 
   deviceManager.on('sensors', (deviceId: string, sensors: SensorMeta[]) => {
     broadcast({ type: 'sensors', deviceId, sensors });
+  });
+
+  deviceManager.on('log', (deviceId: string, entry: LogEntry) => {
+    broadcast({ type: 'log', deviceId, ...entry });
   });
 
   wss.on('connection', (socket) => {
