@@ -57,7 +57,12 @@ export class PhyphoxClient {
     }
   }
 
-  /** Threshold-based incremental fetch: only samples newer than `since` (per timeBufferName) are returned. */
+  /**
+   * Threshold-based incremental fetch: only samples newer than `since` (per timeBufferName) are returned.
+   * The `|` separator must be sent as `%7C` - phyphox's on-device HTTP server rejects a literal `|` in
+   * the query with a 400 (confirmed against a real device; Node's own URL parser is lenient enough that
+   * this wasn't caught by MockPhyphoxServer, which never exercised real query-string validation).
+   */
   getBuffers(
     bufferNames: string[],
     since: number,
@@ -68,7 +73,7 @@ export class PhyphoxClient {
       .map((name) =>
         name === timeBufferName
           ? `${encodeURIComponent(name)}=${since}`
-          : `${encodeURIComponent(name)}=${since}|${encodeURIComponent(timeBufferName)}`,
+          : `${encodeURIComponent(name)}=${since}%7C${encodeURIComponent(timeBufferName)}`,
       )
       .join('&');
     return fetchJson<PhyphoxGetResponse>(`${this.baseUrl}/get?${query}`, signal);
