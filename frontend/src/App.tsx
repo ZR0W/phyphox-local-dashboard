@@ -1,9 +1,10 @@
+import { ActivityLog } from './components/ActivityLog.js';
 import { AddDeviceForm } from './components/AddDeviceForm.js';
 import { DeviceCard } from './components/DeviceCard.js';
 import { useDashboardSocket } from './lib/useDashboardSocket.js';
 
 export function App() {
-  const { devices, series, addDevice } = useDashboardSocket();
+  const { devices, series, logs, addDevice } = useDashboardSocket();
 
   return (
     <main>
@@ -13,6 +14,7 @@ export function App() {
       {devices.map((device) => (
         <DeviceCard key={device.id} device={device} series={series[device.id]} />
       ))}
+      <ActivityLog logs={logs} />
     </main>
   );
 }
