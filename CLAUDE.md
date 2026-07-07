@@ -18,6 +18,8 @@ A local web dashboard (runs on a researcher's laptop, no cloud) that connects to
 
 **Ad hoc activity/connection logging (added before Phase 3):** `DevicePoller` now emits a `'log'` event (`LogEntry` from `@phyphox-dashboard/shared`: `level`/`message`/`timestamp`) alongside its existing `sensors`/`status`/`sample` events, covering `/config` discovery success/failure, `/get` poll failures and throttled "polled: N sample(s)" summaries (~1/sec/device, not one per 200ms tick — unthrottled would flood the log), `/control` commands sent/succeeded/failed, and backoff/reconnect decisions in `handleFailure()`. `DeviceManager` re-emits it tagged with `deviceId`; `ws.ts` broadcasts it as `{type: 'log', deviceId, level, message, timestamp}`. The frontend (`useDashboardSocket.ts`) mirrors every backend-sourced `'log'` message to the browser console (`console.log`/`warn`/`error` by level) and also logs its own WebSocket lifecycle (connect/close/error/reconnect-scheduled, tagged `deviceName: 'dashboard'`) the same way — both feed a capped (200-entry) `logs` array rendered by the new `ActivityLog` component, one global panel in `App.tsx`. No Start/Stop/Clear UI exists yet (still Phase 4), but the `/control` logging already covers it generically for whenever that lands.
 
+**Dev tooling (`scripts/dev.mjs`, added for local dev convenience, not shipped as a build artifact):** `npm run dev` runs `dev:backend` and `dev:frontend` as child processes of one Node orchestrator instead of needing two terminals — it prefixes/colors each process's stdout+stderr live (`[backend]`/`[frontend]`) and also tees the same output (ANSI stripped) to `logs/backend.log`/`logs/frontend.log` (truncated each run; already covered by the existing `*.log` gitignore rule) so it survives after terminal scrollback is gone. On Windows, `child.kill()` only kills the intermediate `cmd.exe` (because these children are spawned with `shell: true`) and leaves the real `npm`/`tsx`/`vite` process bound to its port — confirmed by hand while building this (a `taskkill` without `/T` left a `tsx watch` grandchild orphaned on port 4173 across sessions). `killChild()` therefore shells out to `taskkill /pid <pid> /T /F` on `win32` instead of calling `child.kill()` directly; don't simplify that back to a plain `.kill()` call. `dev:backend`/`dev:frontend` are unchanged and still work standalone in separate terminals if you want to restart one without the other.
+
 ## Locked-in architectural decisions (don't re-litigate without reason)
 
 - Backend owns **all** polling of phone devices; the browser never talks to phones directly — only to the local backend via REST + WebSocket. (`IMPLEMENTATION_PLAN.md` Section 1)
@@ -42,6 +44,8 @@ A local web dashboard (runs on a researcher's laptop, no cloud) that connects to
 ```bash
 npm install   # postinstall builds shared/dist automatically
 npm run lint && npm run format && npm run typecheck && npm run test && npm run build
+npm run dev             # backend + frontend together, one terminal, logged to logs/*.log
+# or, in separate terminals:
 npm run dev:backend    # Fastify + poller + WebSocket hub on http://localhost:4173
 npm run dev:frontend   # Vite dashboard on http://localhost:5173 (proxies /api, /ws to :4173)
 ```
