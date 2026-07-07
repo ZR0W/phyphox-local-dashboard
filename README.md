@@ -25,6 +25,14 @@ npm install
 ## Starting the server
 
 ```bash
+npm run dev             # runs backend + frontend together in one terminal, tailed and logged to logs/
+```
+
+This prefixes each process's output (`[backend]`/`[frontend]`) in the terminal and also tees it (ANSI codes stripped) to `logs/backend.log` and `logs/frontend.log`, overwritten on every run, so output isn't lost once it scrolls off. A single Ctrl+C stops both — on Windows this uses `taskkill /T` under the hood so it kills the whole `npm`/`tsx`/`vite` process tree, not just the top-level shell.
+
+If you'd rather run them in separate terminals (e.g. to restart one without the other):
+
+```bash
 npm run dev:backend    # Fastify backend on http://localhost:4173 (polls phyphox devices)
 npm run dev:frontend   # Vite dashboard UI on http://localhost:5173 (proxies /api and /ws to the backend)
 ```
@@ -64,6 +72,7 @@ npm run format     # Prettier check
 npm run typecheck  # TypeScript across all workspaces
 npm run test       # Vitest across all workspaces
 npm run build      # Build all workspaces
+npm run dev        # backend + frontend together, one terminal, logged to logs/*.log
 ```
 
-This is an npm-workspaces monorepo: `shared/` (types shared between backend and frontend), `backend/` (Node.js/Fastify server that polls phyphox devices), `frontend/` (React/Vite dashboard UI).
+This is an npm-workspaces monorepo: `shared/` (types shared between backend and frontend), `backend/` (Node.js/Fastify server that polls phyphox devices), `frontend/` (React/Vite dashboard UI). `scripts/dev.mjs` is the orchestrator behind `npm run dev`.
