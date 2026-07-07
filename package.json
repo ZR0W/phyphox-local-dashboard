@@ -18,7 +18,8 @@
     "test": "npm run build:shared && npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
     "dev:backend": "npm run build:shared && npm run dev --workspace backend",
-    "dev:frontend": "npm run build:shared && npm run dev --workspace frontend"
+    "dev:frontend": "npm run build:shared && npm run dev --workspace frontend",
+    "dev": "node scripts/dev.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

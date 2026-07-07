@@ -1,18 +1,30 @@
 import { useEffect, useState } from 'react';
-import type { Device, DeviceStatus, Sample, SensorMeta } from '@phyphox-dashboard/shared';
+import type { Device, DeviceStatus, LogLevel, Sample, SensorMeta } from '@phyphox-dashboard/shared';
 
 const MAX_POINTS_PER_BUFFER = 500;
+const MAX_LOG_ENTRIES = 200;
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 10000;
+const DASHBOARD_LOG_SOURCE = 'dashboard';
 
 export interface BufferSeries {
   t: number[];
   v: number[];
 }
 
+export interface LogRecord {
+  id: number;
+  timestamp: number;
+  level: LogLevel;
+  deviceName: string;
+  message: string;
+}
+
 interface DashboardState {
   devices: Record<string, Device>;
   series: Record<string, Record<string, BufferSeries>>;
+  logs: LogRecord[];
+  nextLogId: number;
 }
 
 type SocketMessage =
@@ -21,7 +33,16 @@ type SocketMessage =
   | { type: 'deviceRemoved'; deviceId: string }
   | { type: 'status'; deviceId: string; status: DeviceStatus }
   | { type: 'sensors'; deviceId: string; sensors: SensorMeta[] }
-  | { type: 'sample'; deviceId: string; samples: Sample[] };
+  | { type: 'sample'; deviceId: string; samples: Sample[] }
+  | { type: 'log'; deviceId: string; level: LogLevel; message: string; timestamp: number };
+
+function appendLog(prev: DashboardState, record: Omit<LogRecord, 'id'>): DashboardState {
+  return {
+    ...prev,
+    logs: [{ ...record, id: prev.nextLogId }, ...prev.logs].slice(0, MAX_LOG_ENTRIES),
+    nextLogId: prev.nextLogId + 1,
+  };
+}
 
 function applyMessage(prev: DashboardState, message: SocketMessage): DashboardState {
   switch (message.type) {
@@ -75,19 +96,54 @@ function applyMessage(prev: DashboardState, message: SocketMessage): DashboardSt
       }
       return { ...prev, series: { ...prev.series, [message.deviceId]: deviceSeries } };
     }
+    case 'log': {
+      // Resolve the device name at insertion time, so a log line for a device
+      // that's later removed keeps showing its real name instead of degrading
+      // to a bare id retroactively.
+      const deviceName = prev.devices[message.deviceId]?.name ?? message.deviceId;
+      return appendLog(prev, {
+        timestamp: message.timestamp,
+        level: message.level,
+        deviceName,
+        message: message.message,
+      });
+    }
     default:
       return prev;
   }
 }
 
+function consoleLogFor(level: LogLevel): typeof console.log {
+  if (level === 'error') return console.error;
+  if (level === 'warn') return console.warn;
+  return console.log;
+}
+
 export function useDashboardSocket() {
-  const [state, setState] = useState<DashboardState>({ devices: {}, series: {} });
+  const [state, setState] = useState<DashboardState>({
+    devices: {},
+    series: {},
+    logs: [],
+    nextLogId: 0,
+  });
 
   useEffect(() => {
     let cancelled = false;
     let socket: WebSocket | undefined;
     let reconnectAttempt = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function logClientEvent(level: LogLevel, message: string): void {
+      consoleLogFor(level)(`[dashboard] ${message}`);
+      setState((prev) =>
+        appendLog(prev, {
+          timestamp: Date.now(),
+          level,
+          deviceName: DASHBOARD_LOG_SOURCE,
+          message,
+        }),
+      );
+    }
 
     function connect(): void {
       if (cancelled) return;
@@ -97,17 +153,27 @@ export function useDashboardSocket() {
 
       socket.addEventListener('open', () => {
         reconnectAttempt = 0;
+        logClientEvent('info', 'WebSocket connected');
       });
 
       socket.addEventListener('message', (event) => {
         const message = JSON.parse(event.data as string) as SocketMessage;
+        if (message.type === 'log') {
+          consoleLogFor(message.level)(`[phyphox:${message.deviceId}] ${message.message}`);
+        }
         setState((prev) => applyMessage(prev, message));
       });
 
       // The backend sends a fresh 'deviceList' snapshot on every new
       // connection, so reconnecting after a drop resyncs state automatically.
-      socket.addEventListener('close', scheduleReconnect);
-      socket.addEventListener('error', () => socket?.close());
+      socket.addEventListener('close', () => {
+        logClientEvent('warn', 'WebSocket closed, will attempt to reconnect');
+        scheduleReconnect();
+      });
+      socket.addEventListener('error', () => {
+        logClientEvent('error', 'WebSocket error');
+        socket?.close();
+      });
     }
 
     function scheduleReconnect(): void {
@@ -117,6 +183,7 @@ export function useDashboardSocket() {
         RECONNECT_MAX_DELAY_MS,
       );
       reconnectAttempt += 1;
+      logClientEvent('info', `reconnecting in ${delay}ms (attempt ${reconnectAttempt})`);
       reconnectTimer = setTimeout(connect, delay);
     }
 
@@ -141,5 +208,10 @@ export function useDashboardSocket() {
     }
   }
 
-  return { devices: Object.values(state.devices), series: state.series, addDevice };
+  return {
+    devices: Object.values(state.devices),
+    series: state.series,
+    logs: state.logs,
+    addDevice,
+  };
 }

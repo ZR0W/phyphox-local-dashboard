@@ -94,6 +94,14 @@ describe('device polling pipeline', () => {
     );
     expect(sensorsMessage.sensors).toEqual([{ bufferName: 'accX', label: 'accX' }]);
 
+    const discoveryLogMessage = await waitFor(
+      (message) =>
+        message.type === 'log' &&
+        message.deviceId === device.id &&
+        (message.message as string).includes('discovery succeeded'),
+    );
+    expect(discoveryLogMessage.level).toBe('info');
+
     const sampleMessage = await waitFor(
       (message) => message.type === 'sample' && message.deviceId === device.id,
     );
@@ -112,6 +120,14 @@ describe('device polling pipeline', () => {
     });
     expect(controlResponse.status).toBe(200);
     expect(mockPhone.getLastControlCommand()).toBe('start');
+
+    await waitFor(
+      (message) =>
+        message.type === 'log' &&
+        message.deviceId === device.id &&
+        (message.message as string).includes('cmd=start') &&
+        (message.message as string).includes('succeeded'),
+    );
 
     socket.close();
   });
